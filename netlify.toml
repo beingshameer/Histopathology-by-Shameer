@@ -1,7 +1,7 @@
 [build]
   base = "My Antidote"
   command = "npm run build"
-  publish = "My Antidote/dist"
+  publish = "dist"
 
 [[redirects]]
   from = "/*"
