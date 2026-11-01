@@ -48,11 +48,15 @@ CREATE TABLE IF NOT EXISTS public.images (
 CREATE INDEX IF NOT EXISTS idx_images_uploader ON public.images(uploader_id);
 CREATE INDEX IF NOT EXISTS idx_images_status ON public.images(status);
 
--- 4. Annotations Table (Completed by Doctors / Pathologists)
+-- 4. Annotations Table (Completed by Pathologists via QuPath or Clinicians via Contribution Loop)
 CREATE TABLE IF NOT EXISTS public.annotations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     image_id UUID NOT NULL REFERENCES public.images(id) ON DELETE CASCADE,
     doctor_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE RESTRICT,
+    contributor_type TEXT NOT NULL DEFAULT 'pathologist' CHECK (contributor_type IN ('pathologist', 'clinician')),
+    source TEXT NOT NULL DEFAULT 'qupath' CHECK (source IN ('qupath', 'in_app')),
+    qupath_filename TEXT,
+    qupath_export JSONB, -- Raw QuPath exported GeoJSON FeatureCollection
     annotation_data JSONB NOT NULL, -- Array of shapes, coordinates, classifications (Gleason 3/4/5, Benign, Stroma)
     overlay_file_url TEXT,
     clinical_notes TEXT,
@@ -148,7 +152,12 @@ CREATE POLICY "Doctors can view annotations"
         public.get_current_user_role() = 'doctor'
     );
 
--- Labs & End Users: Have ZERO access to annotations
+-- Clinicians: Can insert research contribution annotations tagged as clinician
+CREATE POLICY "Clinicians can submit research contributions"
+    ON public.annotations FOR INSERT
+    WITH CHECK (
+        public.get_current_user_role() = 'end_user' AND doctor_id = auth.uid() AND contributor_type = 'clinician'
+    );
 
 -- ==============================================================================
 -- 6. Storage Bucket Configuration & Policies

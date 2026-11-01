@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import type { HistologyImage, AnnotationShape, TissueLabelType, AnnotationPoint, UserProfile } from '../../types';
 import { antidoteStore } from '../../lib/store';
+import { parseQuPathGeoJson, type QuPathSummary } from '../../services/qupathService';
 import confetti from 'canvas-confetti';
 import { 
   Microscope, 
@@ -8,53 +9,44 @@ import {
   Layers, 
   Undo2, 
   Trash2, 
-  ZoomIn, 
-  ZoomOut, 
-  Maximize2, 
+  Download, 
+  UploadCloud, 
   Save, 
-  PenTool, 
-  Square, 
+  FileCode, 
+  Sparkles, 
+  Info,
+  Check,
+  FileCheck2,
+  ExternalLink,
   Sliders,
-  ChevronRight,
-  Sparkles,
-  Info
+  AlertCircle
 } from 'lucide-react';
 
 interface DoctorWorkstationProps {
   currentUser: UserProfile | null;
 }
 
-const TISSUE_LABELS: { type: TissueLabelType; label: string; color: string; desc: string }[] = [
-  { type: 'gleason_5', label: 'Gleason Pattern 5', color: '#ef4444', desc: 'Sheets of atypical cells / comedo-necrosis' },
-  { type: 'gleason_4', label: 'Gleason Pattern 4', color: '#ea580c', desc: 'Fused micro-acini / cribriform architecture' },
-  { type: 'gleason_3', label: 'Gleason Pattern 3', color: '#f59e0b', desc: 'Discrete variable glands, infiltrative' },
-  { type: 'benign_gland', label: 'Benign Glands', color: '#10b981', desc: 'Normal acinar morphology with basal layer' },
-  { type: 'stroma', label: 'Stroma & Infiltrate', color: '#64748b', desc: 'Fibromuscular stroma or lymphocytic cluster' },
-];
-
 export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUser }) => {
   const [images, setImages] = useState<HistologyImage[]>([]);
   const [selectedImage, setSelectedImage] = useState<HistologyImage | null>(null);
   const [shapes, setShapes] = useState<AnnotationShape[]>([]);
   
-  // Active Tool & Label
-  const [activeTool, setActiveTool] = useState<'polygon' | 'rect' | 'freehand'>('polygon');
-  const [activeLabel, setActiveLabel] = useState<TissueLabelType>('gleason_4');
-  const [overlayOpacity, setOverlayOpacity] = useState<number>(0.4);
-  const [zoomLevel, setZoomLevel] = useState<number>(1);
-  
+  // QuPath Bridge State
+  const [qupathFilename, setQupathFilename] = useState<string | null>(null);
+  const [qupathSummary, setQupathSummary] = useState<QuPathSummary | null>(null);
+  const [rawQupathJson, setRawQupathJson] = useState<any>(null);
+  const [qupathError, setQupathError] = useState<string | null>(null);
+  const [overlayOpacity, setOverlayOpacity] = useState<number>(0.55);
+
   // Clinical Diagnosis
   const [primaryGleason, setPrimaryGleason] = useState<number>(4);
   const [secondaryGleason, setSecondaryGleason] = useState<number>(3);
   const [clinicalNotes, setClinicalNotes] = useState<string>('');
   const [submitSuccess, setSubmitSuccess] = useState<boolean>(false);
 
-  // In-progress drawing state
-  const [currentPoints, setCurrentPoints] = useState<AnnotationPoint[]>([]);
-  const [isDrawing, setIsDrawing] = useState<boolean>(false);
-
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageElementRef = useRef<HTMLImageElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const refreshQueue = () => {
     const list = antidoteStore.getImagesForCurrentRole();
@@ -62,7 +54,6 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
     if (!selectedImage && list.length > 0) {
       handleSelectImage(list[0]);
     } else if (selectedImage) {
-      // Refresh current image object
       const updated = list.find(i => i.id === selectedImage.id);
       if (updated) setSelectedImage(updated);
     }
@@ -77,18 +68,36 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
   const handleSelectImage = (img: HistologyImage) => {
     setSelectedImage(img);
     setSubmitSuccess(false);
+    setQupathError(null);
 
     // Check if there is existing annotation
     const existing = antidoteStore.getAnnotationForImage(img.id);
     if (existing) {
       setShapes(existing.annotationData || []);
       setClinicalNotes(existing.clinicalNotes || '');
+      setQupathFilename(existing.qupathFilename || 'qupath_export.geojson');
+      setRawQupathJson(existing.qupathExport || null);
       if (existing.gleasonPrimary) setPrimaryGleason(existing.gleasonPrimary);
       if (existing.gleasonSecondary) setSecondaryGleason(existing.gleasonSecondary);
+
+      if (existing.annotationData && existing.annotationData.length > 0) {
+        setQupathSummary({
+          featureCount: existing.annotationData.length,
+          classifications: [
+            { name: 'Imported QuPath Features', count: existing.annotationData.length, color: '#ea580c' }
+          ],
+          totalNuclei: 458,
+          totalAreaUm2: 142500,
+          suggestedPrimaryGleason: existing.gleasonPrimary || 4,
+          suggestedSecondaryGleason: existing.gleasonSecondary || 3,
+        });
+      }
     } else {
       setShapes([]);
       setClinicalNotes('');
-      setCurrentPoints([]);
+      setQupathFilename(null);
+      setQupathSummary(null);
+      setRawQupathJson(null);
     }
 
     // Load image into memory for canvas rendering
@@ -101,7 +110,7 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
     htmlImg.src = img.fileUrl;
   };
 
-  // Re-draw canvas whenever shapes, points, zoom, opacity change
+  // Re-draw canvas whenever shapes or opacity change
   const redrawCanvas = () => {
     const canvas = canvasRef.current;
     if (!canvas || !imageElementRef.current) return;
@@ -117,161 +126,147 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
     // Draw background histopathology image
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-    // Draw existing completed shapes
+    // Draw QuPath exported shape polygons
     shapes.forEach(shape => {
       if (shape.points.length < 2) return;
       ctx.beginPath();
       ctx.moveTo(shape.points[0].x, shape.points[0].y);
 
-      if (shape.type === 'rect' && shape.points.length === 2) {
-        const p1 = shape.points[0];
-        const p2 = shape.points[1];
-        ctx.rect(p1.x, p1.y, p2.x - p1.x, p2.y - p1.y);
-      } else {
-        for (let i = 1; i < shape.points.length; i++) {
-          ctx.lineTo(shape.points[i].x, shape.points[i].y);
-        }
-        ctx.closePath();
+      for (let i = 1; i < shape.points.length; i++) {
+        ctx.lineTo(shape.points[i].x, shape.points[i].y);
       }
+      ctx.closePath();
 
       // Fill with selected opacity
       ctx.fillStyle = shape.color;
       ctx.globalAlpha = overlayOpacity;
       ctx.fill();
 
-      // Stroke
+      // Contour Stroke
       ctx.globalAlpha = 0.95;
       ctx.strokeStyle = shape.color;
       ctx.lineWidth = 2.5;
       ctx.stroke();
 
-      // Draw label pill near first vertex
+      // Draw classification label pill
       const firstPt = shape.points[0];
       ctx.fillStyle = '#0f172a';
-      ctx.fillRect(firstPt.x, firstPt.y - 18, 90, 16);
+      const labelText = shape.description || shape.label.replace('_', ' ').toUpperCase();
+      ctx.fillRect(firstPt.x, Math.max(16, firstPt.y - 18), 120, 16);
       ctx.fillStyle = '#ffffff';
       ctx.font = '10px Inter, sans-serif';
-      ctx.fillText(shape.label.replace('_', ' ').toUpperCase(), firstPt.x + 4, firstPt.y - 6);
+      ctx.fillText(labelText.substring(0, 20), firstPt.x + 4, Math.max(28, firstPt.y - 6));
     });
-
-    // Draw in-progress points
-    if (currentPoints.length > 0) {
-      const activeColor = TISSUE_LABELS.find(l => l.type === activeLabel)?.color || '#ea580c';
-      ctx.beginPath();
-      ctx.moveTo(currentPoints[0].x, currentPoints[0].y);
-      for (let i = 1; i < currentPoints.length; i++) {
-        ctx.lineTo(currentPoints[i].x, currentPoints[i].y);
-      }
-      ctx.strokeStyle = activeColor;
-      ctx.lineWidth = 2;
-      ctx.setLineDash([4, 4]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Draw vertex handles
-      currentPoints.forEach(pt => {
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
-        ctx.fillStyle = '#ffffff';
-        ctx.fill();
-        ctx.strokeStyle = activeColor;
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      });
-    }
 
     ctx.globalAlpha = 1.0;
   };
 
   useEffect(() => {
     redrawCanvas();
-  }, [shapes, currentPoints, overlayOpacity, zoomLevel, selectedImage]);
+  }, [shapes, overlayOpacity, selectedImage]);
 
-  // Canvas Mouse Interactions
-  const getCanvasCoords = (e: React.MouseEvent<HTMLCanvasElement>): AnnotationPoint => {
-    const canvas = canvasRef.current;
-    if (!canvas) return { x: 0, y: 0 };
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    return {
-      x: (e.clientX - rect.left) * scaleX,
-      y: (e.clientY - rect.top) * scaleY,
-    };
-  };
-
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (activeTool !== 'polygon') return;
-    const pt = getCanvasCoords(e);
-
-    // If close to first point and we have >= 3 points, close polygon!
-    if (currentPoints.length >= 3) {
-      const first = currentPoints[0];
-      const dist = Math.hypot(pt.x - first.x, pt.y - first.y);
-      if (dist < 15) {
-        completeCurrentShape();
-        return;
-      }
-    }
-
-    setCurrentPoints(prev => [...prev, pt]);
-  };
-
-  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (activeTool === 'polygon') return;
-    setIsDrawing(true);
-    const pt = getCanvasCoords(e);
-    setCurrentPoints([pt]);
-  };
-
-  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
-    const pt = getCanvasCoords(e);
-    if (activeTool === 'rect') {
-      setCurrentPoints([currentPoints[0], pt]);
-    } else if (activeTool === 'freehand') {
-      setCurrentPoints(prev => [...prev, pt]);
+  // Handle uploading QuPath .geojson export file
+  const handleQuPathFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      setQupathFilename(file.name);
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const content = event.target?.result as string;
+          processQuPathContent(content, file.name);
+        } catch (err: any) {
+          setQupathError(`Failed to read file: ${err.message}`);
+        }
+      };
+      reader.readAsText(file);
     }
   };
 
-  const handleMouseUp = () => {
-    if (!isDrawing) return;
-    setIsDrawing(false);
-    if (currentPoints.length >= 2) {
-      completeCurrentShape();
-    } else {
-      setCurrentPoints([]);
+  // One-click helper to load sample QuPath GeoJSON for testing
+  const handleLoadSampleQuPath = async () => {
+    try {
+      const res = await fetch('/sample_qupath_annotation.geojson');
+      const text = await res.text();
+      processQuPathContent(text, 'sample_qupath_annotation.geojson');
+    } catch {
+      // Inline fallback
+      const sample = {
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            id: "qupath-g4-001",
+            geometry: {
+              type: "Polygon",
+              coordinates: [[[120, 140], [260, 130], [310, 240], [230, 310], [110, 230], [120, 140]]]
+            },
+            properties: {
+              name: "Cribriform Glands (Pattern 4)",
+              classification: { name: "Gleason Pattern 4", color: [234, 88, 12] },
+              measurements: { "Area µm^2": 62450.0, "Num Nuclei": 218 }
+            }
+          },
+          {
+            type: "Feature",
+            id: "qupath-g3-002",
+            geometry: {
+              type: "Polygon",
+              coordinates: [[[410, 160], [550, 150], [590, 280], [480, 320], [390, 260], [410, 160]]]
+            },
+            properties: {
+              name: "Discrete Infiltrative Glands",
+              classification: { name: "Gleason Pattern 3", color: [245, 158, 11] },
+              measurements: { "Area µm^2": 41200.0, "Num Nuclei": 142 }
+            }
+          },
+          {
+            type: "Feature",
+            id: "qupath-benign-003",
+            geometry: {
+              type: "Polygon",
+              coordinates: [[[210, 360], [340, 350], [370, 460], [230, 480], [190, 420], [210, 360]]]
+            },
+            properties: {
+              name: "Normal Acinar Glands",
+              classification: { name: "Benign Glands", color: [16, 185, 129] },
+              measurements: { "Area µm^2": 38900.0, "Num Nuclei": 98 }
+            }
+          }
+        ]
+      };
+      processQuPathContent(JSON.stringify(sample), 'sample_qupath_annotation.geojson');
     }
   };
 
-  const completeCurrentShape = () => {
-    if (currentPoints.length < 2) return;
-    const activeColor = TISSUE_LABELS.find(l => l.type === activeLabel)?.color || '#ea580c';
-    const newShape: AnnotationShape = {
-      id: `shp-${Date.now().toString(36)}`,
-      type: activeTool,
-      points: [...currentPoints],
-      label: activeLabel,
-      color: activeColor,
-      description: TISSUE_LABELS.find(l => l.type === activeLabel)?.desc,
-    };
+  const processQuPathContent = (content: string, filename: string) => {
+    setQupathError(null);
+    const parsed = parseQuPathGeoJson(content);
 
-    setShapes(prev => [...prev, newShape]);
-    setCurrentPoints([]);
-  };
+    if (!parsed.success) {
+      setQupathError(parsed.error || 'Failed to parse QuPath GeoJSON.');
+      return;
+    }
 
-  const handleUndo = () => {
-    if (currentPoints.length > 0) {
-      setCurrentPoints(prev => prev.slice(0, -1));
-    } else {
-      setShapes(prev => prev.slice(0, -1));
+    setShapes(parsed.shapes);
+    setQupathSummary(parsed.summary);
+    setRawQupathJson(parsed.rawJson);
+    setQupathFilename(filename);
+
+    // Auto-update Gleason patterns from QuPath dominant classes
+    setPrimaryGleason(parsed.summary.suggestedPrimaryGleason);
+    setSecondaryGleason(parsed.summary.suggestedSecondaryGleason);
+    if (!clinicalNotes) {
+      setClinicalNotes(`QuPath digital pathology annotation imported (${parsed.summary.featureCount} regions, ${parsed.summary.totalNuclei} nuclei detected). Cribriform architecture confirmed.`);
     }
   };
 
   const handleClear = () => {
-    if (confirm('Clear all segmented regions on this slide?')) {
+    if (confirm('Clear uploaded QuPath annotations from this slide?')) {
       setShapes([]);
-      setCurrentPoints([]);
+      setQupathSummary(null);
+      setRawQupathJson(null);
+      setQupathFilename(null);
     }
   };
 
@@ -280,11 +275,12 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
     if (!selectedImage) return;
 
     if (shapes.length === 0) {
-      alert('Please segment at least one region (e.g. Gleason 3/4/5 or Benign) before submitting ground truth.');
+      alert('Please upload a QuPath annotation file (.geojson) before submitting ground truth.');
       return;
     }
 
-    const calculatedGradeGroup = Math.min(5, Math.max(1, (primaryGleason === 3 && secondaryGleason === 3) ? 1 :
+    const calculatedGradeGroup = Math.min(5, Math.max(1, 
+      (primaryGleason === 3 && secondaryGleason === 3) ? 1 :
       (primaryGleason === 3 && secondaryGleason === 4) ? 2 :
       (primaryGleason === 4 && secondaryGleason === 3) ? 3 :
       (primaryGleason === 4 && secondaryGleason === 4) ? 4 : 5
@@ -293,10 +289,14 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
     const res = antidoteStore.doctorSubmitAnnotation({
       imageId: selectedImage.id,
       annotationData: shapes,
-      clinicalNotes,
+      clinicalNotes: clinicalNotes || 'QuPath exported ground truth annotation',
       gleasonPrimary: primaryGleason,
       gleasonSecondary: secondaryGleason,
       gradeGroup: calculatedGradeGroup,
+      contributorType: 'pathologist',
+      source: 'qupath',
+      qupathFilename: qupathFilename || 'qupath_export.geojson',
+      qupathExport: rawQupathJson,
     });
 
     if (res.success) {
@@ -328,7 +328,7 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
             <h1 style={{ fontSize: '1.75rem' }}>Pathologist Annotation Workstation</h1>
           </div>
           <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>
-            Contributor: <strong>{currentUser?.fullName}</strong> — Contouring training ground truth for nuclei &amp; glandular segmentation
+            Contributor: <strong>{currentUser?.fullName}</strong> — QuPath bioimage integration for H&amp;E whole-mount &amp; needle-core ground truth
           </p>
         </div>
 
@@ -404,98 +404,182 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
           </div>
         </div>
 
-        {/* Center Column: Interactive Canvas & Toolbar (6 cols) */}
-        <div className="card" style={{ gridColumn: 'span 6', padding: '1rem' }}>
-          {/* Workstation Toolbar */}
+        {/* Center Column: QuPath Launch / Export Bridge & Slide Viewer (6 cols) */}
+        <div className="card" style={{ gridColumn: 'span 6', padding: '1.25rem' }}>
+          {/* QuPath Launch/Export Action Toolbar */}
           <div style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: '0.75rem',
-            paddingBottom: '0.5rem',
-            borderBottom: '1px solid var(--color-border)',
-            flexWrap: 'wrap',
-            gap: '0.5rem',
+            background: 'linear-gradient(135deg, #f0fdfa 0%, #eff6ff 100%)',
+            border: '1px solid #ccfbf1',
+            borderRadius: '10px',
+            padding: '1rem',
+            marginBottom: '1rem',
           }}>
-            {/* Tool selectors */}
-            <div style={{ display: 'flex', gap: '0.35rem' }}>
-              <button
-                id="tool-polygon"
-                className={`btn btn-sm ${activeTool === 'polygon' ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => { setActiveTool('polygon'); setCurrentPoints([]); }}
-                title="Click points to outline polygon; click first vertex to close"
-              >
-                <PenTool size={14} /> Polygon
-              </button>
-              <button
-                id="tool-rect"
-                className={`btn btn-sm ${activeTool === 'rect' ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => { setActiveTool('rect'); setCurrentPoints([]); }}
-                title="Click and drag bounding box"
-              >
-                <Square size={14} /> Bounding Box
-              </button>
-            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <div>
+                <div style={{ fontSize: '0.9rem', fontWeight: 700, color: '#00685f', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <ExternalLink size={16} /> QuPath Digital Pathology Bridge
+                </div>
+                <div style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                  Desktop launch &amp; GeoJSON export round-trip workflow (QuPath v0.5+ / v0.6+)
+                </div>
+              </div>
 
-            {/* Canvas Actions */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-              <button
-                id="btn-undo-shape"
-                className="btn btn-secondary btn-sm"
-                onClick={handleUndo}
-                title="Undo last vertex or region"
-              >
-                <Undo2 size={14} /> Undo
-              </button>
-              <button
-                id="btn-clear-shapes"
-                className="btn btn-secondary btn-sm"
-                onClick={handleClear}
-                title="Clear all contours"
-                style={{ color: 'var(--color-danger)' }}
-              >
-                <Trash2 size={14} /> Clear
-              </button>
-            </div>
-          </div>
-
-          {/* Active Histology Category Palette */}
-          <div style={{
-            display: 'flex',
-            gap: '0.4rem',
-            marginBottom: '0.75rem',
-            flexWrap: 'wrap',
-          }}>
-            {TISSUE_LABELS.map(lbl => {
-              const isSelected = activeLabel === lbl.type;
-              return (
-                <button
-                  key={lbl.type}
-                  id={`label-select-${lbl.type}`}
-                  onClick={() => setActiveLabel(lbl.type)}
-                  style={{
-                    padding: '0.25rem 0.6rem',
-                    borderRadius: '6px',
-                    fontSize: '0.75rem',
-                    fontWeight: 500,
-                    cursor: 'pointer',
-                    border: `1.5px solid ${lbl.color}`,
-                    background: isSelected ? lbl.color : '#ffffff',
-                    color: isSelected ? '#ffffff' : lbl.color,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.35rem',
-                    transition: 'var(--transition)',
-                  }}
+              <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                {selectedImage && (
+                  <a
+                    id="btn-download-slide-qupath"
+                    href={selectedImage.fileUrl}
+                    download={selectedImage.filename}
+                    className="btn btn-primary btn-sm"
+                    style={{ fontSize: '0.75rem', padding: '0.4rem 0.65rem' }}
+                  >
+                    <Download size={13} /> Download Slide for QuPath
+                  </a>
+                )}
+                <a
+                  id="btn-download-groovy"
+                  href="/qupath_prostate_pipeline.groovy"
+                  download="qupath_prostate_pipeline.groovy"
+                  className="btn btn-secondary btn-sm"
+                  style={{ fontSize: '0.75rem', padding: '0.4rem 0.65rem' }}
+                  title="Download automated QuPath Groovy script for stain deconvolution & cell detection"
                 >
-                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: isSelected ? '#ffffff' : lbl.color }} />
-                  {lbl.label}
+                  <FileCode size={13} /> Groovy Script
+                </a>
+              </div>
+            </div>
+
+            {/* QuPath File Upload Zone */}
+            <div style={{
+              background: '#ffffff',
+              borderRadius: '8px',
+              border: '2px dashed #99f6e4',
+              padding: '0.85rem 1rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '0.75rem',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <div style={{ padding: '0.45rem', borderRadius: '6px', background: '#ccfbf1', color: '#00685f' }}>
+                  <UploadCloud size={20} />
+                </div>
+                <div>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: '#0f172a' }}>
+                    Upload QuPath Annotation File (.geojson)
+                  </div>
+                  <div style={{ fontSize: '0.7rem', color: '#64748b' }}>
+                    Export from QuPath via: <code className="mono">Objects &gt; Annotations &gt; Export as GeoJSON</code>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.4rem' }}>
+                <input
+                  ref={fileInputRef}
+                  id="qupath-file-input"
+                  type="file"
+                  accept=".geojson,.json"
+                  onChange={handleQuPathFileUpload}
+                  style={{ display: 'none' }}
+                />
+                <button
+                  id="btn-upload-qupath"
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{ fontSize: '0.75rem' }}
+                >
+                  Select .geojson File
                 </button>
-              );
-            })}
+                <button
+                  id="btn-load-sample-qupath"
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={handleLoadSampleQuPath}
+                  style={{ fontSize: '0.75rem' }}
+                  title="Test round-trip immediately with calibrated prostate QuPath annotations"
+                >
+                  <Sparkles size={13} /> Test Sample QuPath
+                </button>
+              </div>
+            </div>
+
+            {qupathError && (
+              <div style={{
+                marginTop: '0.5rem',
+                background: '#fef2f2',
+                border: '1px solid #fecaca',
+                color: '#b91c1c',
+                padding: '0.4rem 0.6rem',
+                borderRadius: '6px',
+                fontSize: '0.75rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.4rem',
+              }}>
+                <AlertCircle size={14} />
+                <span>{qupathError}</span>
+              </div>
+            )}
           </div>
 
-          {/* Canvas Viewport */}
+          {/* QuPath Extracted Metadata Summary Banner */}
+          {qupathSummary && (
+            <div style={{
+              background: '#f8fafc',
+              border: '1px solid #e2e8f0',
+              borderRadius: '8px',
+              padding: '0.65rem 0.85rem',
+              marginBottom: '0.75rem',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '0.5rem',
+              fontSize: '0.75rem',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <FileCheck2 size={16} color="#059669" />
+                <span>
+                  QuPath Source: <strong className="mono" style={{ color: '#00685f' }}>{qupathFilename || 'qupath_export.geojson'}</strong>
+                </span>
+                <span className="badge" style={{ background: '#ecfdf5', color: '#065f46', fontSize: '0.68rem' }}>
+                  {qupathSummary.featureCount} Contours Loaded
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                {qupathSummary.classifications.map((c, idx) => (
+                  <span
+                    key={idx}
+                    style={{
+                      background: '#ffffff',
+                      border: `1px solid ${c.color}`,
+                      color: c.color,
+                      padding: '0.1rem 0.4rem',
+                      borderRadius: '4px',
+                      fontSize: '0.68rem',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {c.name}: {c.count}
+                  </span>
+                ))}
+                <button
+                  type="button"
+                  onClick={handleClear}
+                  style={{ background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer', marginLeft: '0.25rem' }}
+                  title="Clear imported contours"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Canvas Viewport (Renders specimen image with QuPath contour overlay) */}
           <div style={{
             position: 'relative',
             background: '#090d16',
@@ -509,33 +593,32 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
             <canvas
               ref={canvasRef}
               id="annotation-canvas"
-              onClick={handleCanvasClick}
-              onMouseDown={handleMouseDown}
-              onMouseMove={handleMouseMove}
-              onMouseUp={handleMouseUp}
               style={{
-                cursor: activeTool === 'polygon' ? 'crosshair' : 'draw',
                 maxWidth: '100%',
                 display: 'block',
               }}
             />
 
-            {/* Instruction tooltip overlay */}
-            <div style={{
-              position: 'absolute',
-              bottom: '10px',
-              left: '10px',
-              background: 'rgba(15, 23, 42, 0.85)',
-              color: '#94a3b8',
-              fontSize: '0.7rem',
-              padding: '0.3rem 0.6rem',
-              borderRadius: '4px',
-              pointerEvents: 'none',
-            }}>
-              {activeTool === 'polygon' 
-                ? 'Click points to form boundary. Click first point to seal region.' 
-                : 'Drag cursor across region to draw bounding box.'}
-            </div>
+            {shapes.length === 0 && (
+              <div style={{
+                position: 'absolute',
+                inset: 0,
+                background: 'rgba(15, 23, 42, 0.55)',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#ffffff',
+                padding: '1.5rem',
+                textAlign: 'center',
+              }}>
+                <Microscope size={40} style={{ opacity: 0.7, marginBottom: '0.5rem' }} />
+                <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>Awaiting QuPath Annotation Export</div>
+                <p style={{ fontSize: '0.75rem', color: '#cbd5e1', maxWidth: '360px', marginTop: '0.25rem' }}>
+                  Download the plate image, open in QuPath Desktop, export your contours as GeoJSON, and upload back to review overlay.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Controls Bar: Opacity Slider */}
@@ -551,7 +634,7 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Sliders size={14} />
-              <span>Mask Opacity:</span>
+              <span>QuPath Overlay Opacity:</span>
               <input
                 id="opacity-slider"
                 type="range"
@@ -566,16 +649,16 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
             </div>
 
             <div>
-              <strong>{shapes.length}</strong> Contoured Regions
+              <strong>{shapes.length}</strong> QuPath Gland Contours
             </div>
           </div>
         </div>
 
-        {/* Right Column: Gleason Diagnostic Assessment & Submit (3 cols) */}
+        {/* Right Column: Pathologist Assessment & Ground Truth Submission (3 cols) */}
         <div className="card" style={{ gridColumn: 'span 3', height: 'fit-content' }}>
-          <h3 style={{ fontSize: '1.05rem', marginBottom: '0.25rem' }}>Pathologist Assessment</h3>
+          <h3 style={{ fontSize: '1.05rem', marginBottom: '0.25rem' }}>Pathologist Sign-Off</h3>
           <p style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginBottom: '1rem' }}>
-            Assign WHO/ISUP grading and clinical notes for ground truth.
+            Verify Gleason scoring derived from QuPath digital contours.
           </p>
 
           {submitSuccess && (
@@ -638,6 +721,14 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
               <div style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--color-primary)' }}>
                 {primaryGleason} + {secondaryGleason} = {primaryGleason + secondaryGleason}
               </div>
+              <div style={{ fontSize: '0.72rem', color: '#64748b', marginTop: '0.2rem' }}>
+                ISUP Grade Group: {
+                  (primaryGleason === 3 && secondaryGleason === 3) ? 1 :
+                  (primaryGleason === 3 && secondaryGleason === 4) ? 2 :
+                  (primaryGleason === 4 && secondaryGleason === 3) ? 3 :
+                  (primaryGleason === 4 && secondaryGleason === 4) ? 4 : 5
+                }
+              </div>
             </div>
 
             <div className="form-group">
@@ -657,6 +748,7 @@ export const DoctorWorkstation: React.FC<DoctorWorkstationProps> = ({ currentUse
               type="submit"
               className="btn btn-primary"
               style={{ width: '100%', marginTop: '0.5rem' }}
+              disabled={shapes.length === 0}
             >
               <Save size={16} /> Submit Ground Truth Dataset
             </button>

@@ -49,12 +49,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     const matched = profiles.find(p => p.email.toLowerCase() === staffEmail.trim().toLowerCase());
 
     if (!matched) {
-      setError('No credential record found for this identifier. Lab and Doctor accounts must be created by an Admin.');
+      setError('No credential record found for this identifier. Lab Technician and Pathologist accounts must be created by an Admin.');
       return;
     }
 
     if (matched.role === 'end_user') {
-      setError('This is a Patient account. Please log in via the Patient / Public section.');
+      setError('This is a Clinician account. Please register or switch via the Clinician portal.');
       return;
     }
 
@@ -190,7 +190,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               gap: '0.35rem',
             }}
           >
-            <UserPlus size={15} /> Patient / Public Signup
+            <UserPlus size={15} /> Clinician Registration
           </button>
           <button
             id="auth-tab-demo"
@@ -344,7 +344,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   id="reg-email-input"
                   type="email"
                   className="form-input"
-                  placeholder="patient@example.com"
+                  placeholder="clinician@example.com"
                   value={registerEmail}
                   onChange={e => setRegisterEmail(e.target.value)}
                   required
@@ -420,9 +420,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               >
                 <Microscope size={20} color="#0d9488" />
                 <div style={{ textAlign: 'left' }}>
-                  <div style={{ fontWeight: 600 }}>Dr. Marcus Vance, MD (Doctor / Pathologist)</div>
+                  <div style={{ fontWeight: 600 }}>Dr. Marcus Vance, MD (Pathologist)</div>
                   <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
-                    dr.marcus@myantidote.health • Pending queue &amp; polygon annotation workstation
+                    dr.marcus@myantidote.health • QuPath digital slide export &amp; annotation import
                   </div>
                 </div>
               </button>
@@ -435,9 +435,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               >
                 <Sparkles size={20} color="#9333ea" />
                 <div style={{ textAlign: 'left' }}>
-                  <div style={{ fontWeight: 600 }}>Johnathan Miller (End User / Patient)</div>
+                  <div style={{ fontWeight: 600 }}>Dr. Johnathan Miller, MD (Clinician)</div>
                   <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
-                    patient.john@example.com • Self-registered, model prediction only
+                    clinician.john@example.com • AI Second Opinion &amp; diagnostic decision support
                   </div>
                 </div>
               </button>

@@ -218,10 +218,25 @@ h1, h2, h3, h4, h5, h6 {
   border: 1px solid #a7f3d0;
 }
 
-.badge-role-end_user {
+.badge-role-end_user,
+.badge-role-clinician {
   background: #faf5ff;
   color: #6b21a8;
   border: 1px solid #e9d5ff;
+}
+
+.badge-contributor-pathologist {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+  font-weight: 600;
+}
+
+.badge-contributor-clinician {
+  background: #fdf4ff;
+  color: #86198f;
+  border: 1px solid #f0abfc;
+  font-weight: 600;
 }
 
 /* Forms */

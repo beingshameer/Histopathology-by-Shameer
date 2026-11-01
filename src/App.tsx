@@ -76,7 +76,7 @@ export const App: React.FC = () => {
               <Lock size={44} color="var(--color-primary)" style={{ margin: '0 auto 1rem' }} />
               <h2 style={{ fontSize: '1.4rem', marginBottom: '0.5rem' }}>Authentication Required</h2>
               <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', marginBottom: '1.5rem' }}>
-                Please sign in with your issued staff credentials (Lab or Doctor) or register as a public/patient user.
+                Please sign in with your issued staff credentials (Lab Technician or Pathologist) or register as a clinician user.
               </p>
               <button
                 id="btn-prompt-signin"

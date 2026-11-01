@@ -349,7 +349,7 @@ export const AdminDashboard: React.FC = () => {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
                   <strong style={{ fontSize: '0.85rem' }}>{usr.fullName}</strong>
                   <span className={`badge badge-role-${usr.role}`}>
-                    {usr.role}
+                    {usr.role === 'admin' ? 'Admin' : usr.role === 'doctor' ? 'Pathologist' : usr.role === 'lab' ? 'Lab Technician' : 'Clinician'}
                   </span>
                 </div>
                 <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
@@ -455,8 +455,8 @@ export const AdminDashboard: React.FC = () => {
                     value={formRole}
                     onChange={e => setFormRole(e.target.value as any)}
                   >
-                    <option value="lab">Histopathology Lab (Upload Plates &amp; View Own Uploads)</option>
-                    <option value="doctor">Doctor / Pathologist (Annotate Plates in Queue)</option>
+                    <option value="lab">Lab Technician (Upload Biopsy Plates &amp; View Own Uploads)</option>
+                    <option value="doctor">Pathologist (Annotate Plates with QuPath &amp; Gleason)</option>
                   </select>
                 </div>
 

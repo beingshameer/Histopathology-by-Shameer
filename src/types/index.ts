@@ -9,6 +9,7 @@ export interface UserProfile {
   badgeNumber?: string;
   createdAt: string;
   temporaryPassword?: string;
+  predictionsRun?: number;
 }
 
 export type ImageStatus = 'pending' | 'annotated' | 'archived';
@@ -52,11 +53,43 @@ export interface AnnotationShape {
   description?: string;
 }
 
+export type ContributorType = 'pathologist' | 'clinician';
+
+export interface QuPathFeature {
+  type: 'Feature';
+  id?: string;
+  geometry: {
+    type: 'Polygon' | 'MultiPolygon' | 'Point' | 'LineString';
+    coordinates: any;
+  };
+  properties?: {
+    objectType?: string;
+    classification?: {
+      name: string;
+      color?: number[] | string;
+    };
+    measurements?: Record<string, number>;
+    isLocked?: boolean;
+    [key: string]: any;
+  };
+}
+
+export interface QuPathGeoJSON {
+  type: 'FeatureCollection' | 'Feature';
+  features?: QuPathFeature[];
+  geometry?: any;
+  properties?: any;
+}
+
 export interface ImageAnnotation {
   id: string;
   imageId: string;
   doctorId: string;
   doctorName?: string;
+  contributorType?: ContributorType;
+  source?: 'qupath' | 'in_app';
+  qupathFilename?: string;
+  qupathExport?: QuPathGeoJSON;
   annotationData: AnnotationShape[];
   overlayUrl?: string;
   clinicalNotes: string;

@@ -1,24 +1,32 @@
-import type { UserProfile, HistologyImage, ImageAnnotation, UserRole } from '../types';
+import type { UserProfile, HistologyImage, ImageAnnotation, UserRole, ContributorType } from '../types';
 import { INITIAL_PROFILES, INITIAL_IMAGES, INITIAL_ANNOTATIONS, createHistologySlideSvg } from './sampleData';
 
 const STORAGE_KEYS = {
-  CURRENT_USER: 'myantidote_current_user',
-  PROFILES: 'myantidote_profiles',
-  IMAGES: 'myantidote_images',
-  ANNOTATIONS: 'myantidote_annotations',
+  CURRENT_USER: 'myantidote_user_clean_v2',
+  PROFILES: 'myantidote_profiles_clean_v2',
+  IMAGES: 'myantidote_images_clean_v2',
+  ANNOTATIONS: 'myantidote_annotations_clean_v2',
+  USAGE_STATS: 'myantidote_usage_stats_v2',
 };
 
 class AntidoteStore {
   private profiles: UserProfile[];
   private images: HistologyImage[];
   private annotations: ImageAnnotation[];
+  private usageStats: Record<string, number>;
   private currentUser: UserProfile | null;
   private listeners: Set<() => void> = new Set();
 
   constructor() {
+    // Purge old demo storage if present
+    ['myantidote_current_user', 'myantidote_profiles', 'myantidote_images', 'myantidote_annotations'].forEach(k => {
+      try { localStorage.removeItem(k); } catch {}
+    });
+
     this.profiles = this.load(STORAGE_KEYS.PROFILES, INITIAL_PROFILES);
     this.images = this.load(STORAGE_KEYS.IMAGES, INITIAL_IMAGES);
     this.annotations = this.load(STORAGE_KEYS.ANNOTATIONS, INITIAL_ANNOTATIONS);
+    this.usageStats = this.load(STORAGE_KEYS.USAGE_STATS, {});
     
     const savedUser = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
     if (savedUser) {
@@ -28,7 +36,6 @@ class AntidoteStore {
         this.currentUser = this.profiles[0];
       }
     } else {
-      // Default to Admin for testing and development overview
       this.currentUser = this.profiles[0];
       this.save(STORAGE_KEYS.CURRENT_USER, this.currentUser);
     }
@@ -77,18 +84,57 @@ class AntidoteStore {
       this.setCurrentUser(matched);
       return matched;
     }
-    // Fallback: create a temporary profile for that role
+    // Fallback: create a temporary profile with professional credentials
+    const roleMeta: Record<UserRole, { name: string; email: string; org: string }> = {
+      admin: { name: 'System Administrator (You)', email: 'admin@myantidote.local', org: 'My Antidote Platform' },
+      lab: { name: 'North Histology Lab Operations', email: 'lab.north@myantidote.health', org: 'North Regional Pathology Core' },
+      doctor: { name: 'Dr. Marcus Vance, MD (Pathologist)', email: 'dr.marcus@myantidote.health', org: 'University Hospital Pathology Dept' },
+      end_user: { name: 'Dr. Johnathan Miller, MD (Clinician)', email: 'clinician.john@myantidote.health', org: 'Urology Clinical Practice' },
+    };
+    const meta = roleMeta[role];
     const fallbackUser: UserProfile = {
       id: `usr-${role}-${Date.now().toString(36)}`,
-      email: `${role}@myantidote.local`,
+      email: meta.email,
       role,
-      fullName: `Active ${role.toUpperCase()} User`,
+      fullName: meta.name,
+      organization: meta.org,
+      predictionsRun: 0,
       createdAt: new Date().toISOString(),
     };
     this.profiles.push(fallbackUser);
     this.save(STORAGE_KEYS.PROFILES, this.profiles);
     this.setCurrentUser(fallbackUser);
     return fallbackUser;
+  }
+
+  // --- Clinician Usage Stats & Prediction Counter ---
+  public getPredictionCount(userId?: string): number {
+    const id = userId || this.currentUser?.id;
+    if (!id) return 0;
+    return this.usageStats[id] || 0;
+  }
+
+  public incrementPredictionCount(userId?: string): number {
+    const id = userId || this.currentUser?.id;
+    if (!id) return 1;
+    const current = this.usageStats[id] || 0;
+    const newCount = current + 1;
+    this.usageStats[id] = newCount;
+    this.save(STORAGE_KEYS.USAGE_STATS, this.usageStats);
+
+    // Sync to user profile object
+    const profile = this.profiles.find(p => p.id === id);
+    if (profile) {
+      profile.predictionsRun = newCount;
+      this.save(STORAGE_KEYS.PROFILES, this.profiles);
+    }
+    if (this.currentUser?.id === id) {
+      this.currentUser.predictionsRun = newCount;
+      this.save(STORAGE_KEYS.CURRENT_USER, this.currentUser);
+    }
+
+    this.notify();
+    return newCount;
   }
 
   public registerEndUser(email: string, fullName: string): { success: boolean; user?: UserProfile; error?: string } {
@@ -101,8 +147,9 @@ class AntidoteStore {
       id: `usr-enduser-${Date.now().toString(36)}`,
       email,
       fullName,
-      role: 'end_user', // Enforce only end_user role
-      organization: 'Self-Registered Medical User',
+      role: 'end_user', // Enforce only end_user (Clinician) role
+      organization: 'Clinical Practitioner',
+      predictionsRun: 0,
       createdAt: new Date().toISOString(),
     };
 
@@ -231,7 +278,7 @@ class AntidoteStore {
     return { success: true, image: newImage };
   }
 
-  // --- Doctor Annotation Workstation (RLS Protected) ---
+  // --- Pathologist Annotation Workstation (QuPath Integration) ---
   public doctorSubmitAnnotation(params: {
     imageId: string;
     annotationData: any[];
@@ -239,10 +286,14 @@ class AntidoteStore {
     gleasonPrimary?: number;
     gleasonSecondary?: number;
     gradeGroup?: number;
+    contributorType?: ContributorType;
+    source?: 'qupath' | 'in_app';
+    qupathFilename?: string;
+    qupathExport?: any;
   }): { success: boolean; annotation?: ImageAnnotation; error?: string } {
     // RLS check
     if (this.currentUser?.role !== 'doctor' && this.currentUser?.role !== 'admin') {
-      return { success: false, error: 'Unauthorized: Only consulting Doctors and Pathologists can submit annotations.' };
+      return { success: false, error: 'Unauthorized: Only consulting Pathologists can submit verified annotations.' };
     }
 
     const image = this.images.find(img => img.id === params.imageId);
@@ -255,6 +306,10 @@ class AntidoteStore {
       imageId: params.imageId,
       doctorId: this.currentUser.id,
       doctorName: this.currentUser.fullName,
+      contributorType: params.contributorType || 'pathologist',
+      source: params.source || 'qupath',
+      qupathFilename: params.qupathFilename,
+      qupathExport: params.qupathExport,
       annotationData: params.annotationData,
       clinicalNotes: params.clinicalNotes,
       gleasonPrimary: params.gleasonPrimary,
@@ -269,6 +324,87 @@ class AntidoteStore {
     this.save(STORAGE_KEYS.ANNOTATIONS, this.annotations);
 
     // Update image status to 'annotated'
+    image.status = 'annotated';
+    image.updatedAt = new Date().toISOString();
+    this.save(STORAGE_KEYS.IMAGES, this.images);
+
+    this.notify();
+    return { success: true, annotation: newAnnotation };
+  }
+
+  // Candidate specimen for research contribution loop
+  public getCandidateImageForClinicianContribution(): HistologyImage {
+    const pending = this.images.find(img => img.status === 'pending');
+    if (pending) return pending;
+    if (this.images.length > 0) return this.images[0];
+    return {
+      id: 'img-bx-9042',
+      uploaderId: 'lab-01',
+      uploaderName: 'North Histology Lab Operations',
+      fileUrl: createHistologySlideSvg('BX-2026-9042'),
+      filename: 'prostate_core_bx_9042_40x.png',
+      specimenId: 'BX-2026-9042',
+      tissueType: 'Prostate Core Biopsy (Peripheral Zone)',
+      stainType: 'H&E (Hematoxylin & Eosin)',
+      magnification: '40x Optical',
+      status: 'pending',
+      notes: 'Research candidate specimen',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  // --- Clinician Contribution Loop (Lightweight Ground Truth Contribution) ---
+  public clinicianSubmitAnnotation(params: {
+    imageId: string;
+    annotationData: any[];
+    clinicalNotes: string;
+    gleasonPrimary?: number;
+    gleasonSecondary?: number;
+    gradeGroup?: number;
+  }): { success: boolean; annotation?: ImageAnnotation; error?: string } {
+    if (!this.currentUser) {
+      return { success: false, error: 'Unauthorized: Authentication required to submit annotations.' };
+    }
+
+    let image = this.images.find(img => img.id === params.imageId);
+    if (!image) {
+      image = {
+        id: params.imageId,
+        uploaderId: 'lab-01',
+        uploaderName: 'North Histology Lab Operations',
+        fileUrl: createHistologySlideSvg('BX-RESEARCH-CONTRIB'),
+        filename: 'bx_research_contrib.png',
+        specimenId: 'BX-RESEARCH-CONTRIB',
+        tissueType: 'Prostate Core Biopsy',
+        stainType: 'H&E',
+        magnification: '40x',
+        status: 'annotated',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      this.images.unshift(image);
+    }
+
+    const newAnnotation: ImageAnnotation = {
+      id: `anno-clinician-${Date.now().toString(36)}`,
+      imageId: params.imageId,
+      doctorId: this.currentUser.id,
+      doctorName: this.currentUser.fullName,
+      contributorType: 'clinician', // Tagged as clinician for training dataset distinction
+      source: 'in_app',
+      annotationData: params.annotationData,
+      clinicalNotes: params.clinicalNotes,
+      gleasonPrimary: params.gleasonPrimary,
+      gleasonSecondary: params.gleasonSecondary,
+      gradeGroup: params.gradeGroup,
+      createdAt: new Date().toISOString(),
+    };
+
+    this.annotations = this.annotations.filter(a => a.imageId !== params.imageId);
+    this.annotations.unshift(newAnnotation);
+    this.save(STORAGE_KEYS.ANNOTATIONS, this.annotations);
+
     image.status = 'annotated';
     image.updatedAt = new Date().toISOString();
     this.save(STORAGE_KEYS.IMAGES, this.images);
@@ -300,12 +436,14 @@ class AntidoteStore {
 
     const exportPackage = {
       project: 'My Antidote - Prostate Cancer Detection FYP',
-      version: '1.0-clinical',
+      version: '2.0-clinical-qupath',
       exportedAt: new Date().toISOString(),
       exportedBy: this.currentUser.fullName,
       totalImages: this.images.length,
       annotatedImagesCount: this.images.filter(img => img.status === 'annotated').length,
       pendingImagesCount: this.images.filter(img => img.status === 'pending').length,
+      pathologistVerifiedCount: this.annotations.filter(a => a.contributorType !== 'clinician').length,
+      clinicianContributedCount: this.annotations.filter(a => a.contributorType === 'clinician').length,
       dataset: this.images.map(img => {
         const annotation = this.annotations.find(a => a.imageId === img.id);
         return {
@@ -319,6 +457,9 @@ class AntidoteStore {
           uploadedAt: img.createdAt,
           annotation: annotation ? {
             annotatedBy: annotation.doctorName,
+            contributorType: annotation.contributorType || 'pathologist',
+            source: annotation.source || 'qupath',
+            qupathFilename: annotation.qupathFilename || null,
             annotatedAt: annotation.createdAt,
             clinicalNotes: annotation.clinicalNotes,
             gleasonScore: (annotation.gleasonPrimary && annotation.gleasonSecondary)
@@ -326,6 +467,7 @@ class AntidoteStore {
               : null,
             gradeGroup: annotation.gradeGroup,
             shapes: annotation.annotationData,
+            qupathExport: annotation.qupathExport || null,
           } : null,
         };
       }),
